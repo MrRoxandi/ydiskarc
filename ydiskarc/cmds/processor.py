@@ -167,39 +167,72 @@ def sha256(fname):
     return hash_sha256.hexdigest()
 
 
+ITEMS_PER_PAGE = 100  # Yandex Disk API maximum per request
+
+
+def yd_get_all_items(url, path):
+    """Fetch all items from a directory using pagination."""
+    all_items = []
+    offset = 0
+    total = None
+    while True:
+        try:
+            resp = requests.get(YD_API, params={
+                'public_key': url,
+                'path': path,
+                'limit': ITEMS_PER_PAGE,
+                'offset': offset,
+            }, timeout=GET_TIMEOUT)
+        except Exception as e:
+            logging.warning(f"Connection error {e.__class__} getting directory {url}{path} offset={offset}")
+            return None, None, e
+        if resp.status_code != requests.status_codes.codes.ALL_OK:
+            return resp, None, None
+        data = resp.json()
+        embedded = data.get('_embedded', {})
+        items = embedded.get('items', [])
+        all_items.extend(items)
+        if total is None:
+            total = embedded.get('total', len(items))
+            logging.info(f"Directory {path}: total items = {total}")
+        offset += len(items)
+        if offset >= total or len(items) == 0:
+            break
+    return resp, all_items, None
+
+
 def yd_get_and_store_dir(url, path, output, nofiles=False, iterative=False):
     global gotten_dirs, error_dirs, again_files, already_files
-    # print(f"requests.get params = {url}, {path}")
-    try:
-        resp = requests.get(YD_API, params={'public_key': url, 'path' : path}, timeout = GET_TIMEOUT)
-        data = resp.json()
-    except Exception as e:
-        logging.warning(f"Connection error {e.__class__} getting directory {url}{path}")
-        error_dirs += [(url, path, e.__class__)]
+
+    resp, all_items, exc = yd_get_all_items(url, path)
+
+    if exc is not None:
+        logging.warning(f"Connection error {exc.__class__} getting directory {url}{path}")
+        error_dirs += [(url, path, exc.__class__)]
         return
+
     arr = [output, ]
     arr.extend(url_to_dir_list(path))
     os.makedirs(os.path.join(*arr), exist_ok=True)
-    
+
     if resp.status_code != requests.status_codes.codes.ALL_OK:
         logging.warning(f"Error {resp.status_code} getting directory {url}{path} : {resp.text} : {resp.reason}")
         error_dirs += [(url, path, resp.status_code, resp.text, resp.reason)]
         return
-    
+
     gotten_dirs += 1
-    
+
     if nofiles: # metadata is written to disk only if --nofiles flag is given
         logging.info('Saving metadata of %s' % (os.path.join(os.path.join(*arr))))
         f = open(os.path.join(os.path.join(*arr), '_metadata.json'), 'w', encoding='utf8')
         f.write(resp.text)
         f.close()
-    
+
     if not iterative:
         return resp.json()
     else:
-        data = resp.json()
-        if '_embedded' in data.keys():
-            for row in data['_embedded']['items']:
+        if all_items is not None:
+            for row in all_items:
                 if 'path' in row.keys():
                     if row['type'] == 'dir':
                         arr = [output,]
